@@ -1,0 +1,26 @@
+#!/usr/bin/php
+<?php
+function _help(){
+echo "Swaps two files (renames them to each other)\n";
+echo "Usage: ".$GLOBALS['argv'][0]." <file1> <file2>\n";
+}
+function _fatal($msg){
+_help();
+echo $msg."\n\n";
+exit();
+}
+if (3!=count($argv)) {
+_fatal("expecting 2 arguments");
+}
+$f1=$argv[1]; $f2=$argv[2];
+$uniq = substr(md5(microtime()),0,5);
+if (file_exists($uniq)){ echo "no: existed.\n"; exit(); }
+if (!file_exists($f1)){_fatal("not exist $f1");}
+if (!file_exists($f2)){_fatal("not exist $f2");}
+exec("mv $f1 $uniq",$lines,$resp);
+if ($resp) {_fatal("i failed you master ".$resp);} 
+exec("mv $f2 $f1",$lines,$resp);
+if ($resp) {_fatal('life also sucks '.$resp); }
+exec("mv $uniq $f2",$lines,$resp);
+if ($resp) {_fatal("what gives g? $resp"); }
+echo "\nswapped \"$f1\" and \"$f2\".\n";

@@ -1,0 +1,317 @@
+#!/usr/bin/php
+<?php
+// classes and functions named with leading underscores are private to this file
+// ************************ start reusable locii of logic (functions) ***********
+function _about(){
+  echo "\nThis utility generates and/or pushes various kinds of diffs in various ways; using svn, git, rsync, svn, diffs of diffs and the filesystem.  For now it is only ever interactive and on the console.  Please try it and see what it breaks. It will try to warn you before it does something dumb.\n\n";
+}
+function _usage(){
+  echo "usage: ".$GLOBALS['argv'][0].' IN_PATH OUT_PATH'."\n\n";
+}
+function _fatal($msg){
+  // $bt = debug_backtrace();  TODO
+  echo $msg."\n";
+  exit();
+}
+function _polite_exit(){
+  echo "Goodbye.\n";
+  exit();
+}
+function _exec($cmd,&$resultLines){
+  exec($cmd,$resultLines,$respCode);
+  if (0!==$respCode){
+    _fatal("Failed to execute the following command because got response code \"$respCode\" -- \"$cmd\"");
+  }
+}
+function _display_options($data){
+  foreach($data['options'] as $k=>$v){
+    echo '['.$k.'] - '.$v['desc']."\n";
+  }
+  echo '[q] - quit'."\n";
+  echo "Enter your choice".(isset($data['default']) ? (" (default: \"".$data['default']."\")") : '' ).': ';
+}
+function _prompt($data){
+  $data += array('allowMultiple'=>false,'doDisplayOptions'=>true);
+  extract($data);//$options, $allowMutliple, $message, $default, doDisplayOptions  
+  $message = strtr($message, array('%multipleMessage%'=>$allowMultiple ? $multipleMessage : ''));
+  do{
+    echo $message."\n";
+    $doDisplayOptions and _display_options($data);
+    $entry = strtolower(trim(fgets(STDIN)));
+    if ('q'===$entry) { _polite_exit(); }
+    elseif (''===$entry && isset($default)) { $entry = $default; }
+    $entries = $allowMultiple ? split(',',$entry) : array($entry);
+    $chosenHash = array();
+    $unrecognized = array();
+    foreach($entries as $entry) {
+      $entry = trim($entry);
+      if (array_key_exists($entry,$options)){
+        $key = isset($options[$entry]['internalKey']) ? $options[$entry]['internalKey'] : $entry;
+        $chosenHash[$key] = true;
+      } else {
+        $unrecognized []= $entry;
+      }
+    }
+    $chosen = array_keys($chosenHash);
+    if (0==count($unrecognized)&&0==count($entries)){
+      echo "Please choose an option or enter 'q' to quit.\n";
+    } elseif (count($unrecognized)) {
+      echo "Unrecognized decision"._s($unrecognized).' '._list($unrecognized)." Please choose a chosen choice.\n";      
+    } else {
+      $return = $allowMultiple ? $chosen : $chosen[0];
+      break;
+    }
+  } while (true);
+  return $return;
+}
+function _do_svn_status($choices,&$resultObj){
+  $cmd = 'svn status --ignore-externals "'.$choices->inPath.'"';
+  _exec($cmd,$lines);
+  $fileList=array();
+  $ignoredCnt = 0; // not used for now
+  $ignoredDeleted = 0;
+  foreach($lines as $line){ // we used to use awk
+    if(!preg_match('/^(M|\?|X|A|D).......(.+)$/',$line,$m)){
+      _fatal("sorry, we don't yet have a strategy for this status: \"$line\"");
+    }
+    /* __TODO__ -- how to handle this ?  */ if (preg_match('/\btm-link$/',$m[2])) { continue; }
+    switch($m[1]) {
+      case 'D': $ignoredDeleted++; break;
+      case 'M': case 'A': case '?':
+        $fileList[]=$m[2]; break;
+    }
+  }
+  if ($ignoredCnt) {
+    echo "Ignoring $ignoredCnt file"._s($ignoredCnt).".\n";
+  }
+  if (0==count($fileList)) {
+    echo 'There were no changes from the "svn status" command.'."\n";
+  }
+  $choices->fileList = $fileList;
+  _make_diff_from_file_list($choices,$resultObj);
+}
+function _do_svn_diff($choices,&$resultObj){
+  $cmd = 'svn diff '._escape_path($choices->inPath);
+  if (!$resultObj->isStdOut()) {
+    $path = $choices->outPath.'/.ignore/svn.diff';
+    $resultObj->setFileHandle($path);
+  }
+  _exec($cmd,$lines);
+  $resultObj->addLines($lines);
+  if (!$resultObj->isStdOut()) {
+    echo "wrote svn diff to \"".$resultObj->getPathName()."\"\n";
+  }
+}
+function _escape_path($path){
+  return '"'.addslashes($path).'"';
+}
+function _do_find_all($choices,&$resultObj){
+  $cmd= "find "._escape_path($choices->inPath)." -not \( -type d \)";
+  _exec($cmd,$resultLines);
+  foreach($resultLines as $line){
+    $resultObj->addLine($line."\n");
+  }
+}
+function _s($mixed){
+  if (is_array($mixed)) { $mixed=count($mixed); }
+  return (1==$mixed)?'':'s';
+}
+function _list($ary){
+  $ary = array_map(create_function('$x','return "\"".$x."\"";'),$ary);
+  if (1==count($ary)) {
+    return $ary[0];
+  } else {
+    return join(', ',$ary);
+  }
+}
+function _make_diff_from_file_list($in,&$out){
+  foreach ($in->outChoices as $choice) {
+    switch ($choice) {
+      case 'subtree':
+        _make_subtree($in,$out);
+      break;
+      case 'file_list':
+        _make_file_list($in,$out);
+      break;
+    }
+  }
+}
+function _make_subtree($in,&$out){
+  $inPath = $in->inPath;
+  $outPath = $in->outPath;
+  foreach($in->fileList as $file){ // e.g. "whatever.com/apps/web/"
+    $re = '@^'.($inPath=='.'?'':($inPath.'/')).'(.+)$@';
+    if (!preg_match($re,$file,$m)) {
+      _fatal("not sure why we couldn't match: $file against $re");
+    }
+    $newFile = $outPath .'/'. $m[1];
+    if (!is_dir(dirname($newFile))) {
+      _mkdir(dirname($newFile),0755,true);
+    }
+    _copy($file,$newFile);
+  }
+  echo "Finished making subtree at \"$outPath\" with ".count($in->fileList)." files.\n";
+}
+function _make_file_list($in,&$out){
+  if (!$out->isStdOut()) {
+    $path = $in->outPath.'/.ignore/files.list';
+    $out->setFileHandle($path);
+  }
+  $out->addLines($in->fileList);
+  if (!$out->isStdOut()) {
+    echo "Wrote list of files to \"$path\"\n";
+  }
+}
+function _remove_trailing_slashes($path){
+  if (preg_match('@^(.+)/+$@',$path,$m)) {
+    return $m[1];
+  } else {
+    return $path;
+  }
+}
+function _mkdir($a,$b,$c){
+  if (!mkdir($a,$b,$c)) {
+    _fatal("Couldn't make directory: \"$a\"");
+  }
+}
+function _chmod($a,$b){
+  if (!chmod($a,$b)) {
+    _fatal("Couldn't change mode of '$a'");
+  }
+}
+function _copy($a,$b){
+  if (!copy($a,$b)) {
+    _fatal("Couldn't copy \"$a\" to \"$b\"");
+  }
+}
+function _get_output_filehandle($path){
+  if (!is_dir(dirname($path))) {
+    _mkdir(dirname($path),0755,true);
+  }
+  if (! $fh = fopen($path,'w+')){
+    _fatal("couldn't open path for writing: \"$path\"");
+  }
+  return $fh;
+}
+// ***************************** end functions ******************************
+// ***************************** classes ************************************
+class _Diffy_ResultStructure{
+  public $fh;
+  private $isStdOut=false;
+  
+  public function __construct(){
+    // this code block is intentionally empty
+  }
+  public function setOutAsStdOut(){
+    $this->isStdOut=true;
+    $this->fh=STDOUT;
+    $this->pathName = 'STDOUT';
+  }
+  public function isStdOut(){
+    return $this->isStdOut;
+  }
+  public function addLine($line){
+    if (!is_resource($this->fh)){
+      throw new Exception('fix this. was not resource');
+      //_fatal('was not resource');
+    }
+    fputs($this->fh,$line);
+  }
+  public function addLines($lines){
+    foreach($lines as $line){
+      $this->addLine($line."\n");
+    }
+  }
+  public function setFileHandle($fh){
+    if (is_string($fh)){
+      $path = $fh;
+      $fh = _get_output_filehandle($path);
+    }
+    if (!is_resource($fh)) {
+      _fatal("Expecting resource: \"$fh\"");
+    }
+    $this->fh = $fh;
+    if (isset($path)){ $this->pathName = $path; }
+  }
+  public function getPathName(){
+    return $this->pathName;
+  }
+}
+// ***************************** end classes ********************************
+// ***************************** run this cli action ************************
+if (1==$argc) {
+  _about();
+  _usage();
+  exit();
+}
+if (3>$argc) {
+  _usage();
+  exit();
+}
+$choices = new stdClass();
+list($toss,$choices->inPath,$choices->outPath) = $argv;
+$choices->inPath = _remove_trailing_slashes($choices->inPath);
+$choices->outPath = _remove_trailing_slashes($choices->outPath);
+$resultObj = new _Diffy_ResultStructure();
+// somewhere around here we should not prompt if there is only one choice
+if ('-'===$choices->outPath) {
+  $resultObj->setOutAsStdOut();
+  $chioces->outChoices = array('std_out');  
+} else {
+  // set outChoices as prompt afer in choices processing
+}
+if (!file_exists($choices->inPath)){
+  _fatal("input path must exist yet did not: \"$choices->inPath\"");
+}
+if (!$resultObj->isStdOut() && file_exists($choices->outPath)){
+  switch(_prompt(array(
+    'message'=>"Output path \"".$choices->outPath."\" exists. Overwrite? [y,n] (default:y): ",
+    'options'=>array('y'=>null,'n'=>null),
+    'default'=>'y',
+    'doDisplayOptions'=>false
+  ))){
+    case 'y': 
+      if ('/'===$choices->outPath[0]) { _fatal("watchout"); }
+      _exec('rm -rf '.$choices->outPath,$lines);
+      break;
+    case 'n': _polite_exit(); break;
+  }
+}
+$choices->inChoices = _prompt(array(
+  'message'=>"How do you want to generate the diff?%multipleMessage% ",
+  'multipleMessage'=>" (you can choose multiple with a comma-separated list)",
+  'options'=>array(
+    '1'=>array('desc'=>'use "svn status" to generate list of changed files.','internalKey'=>'svn_status'),
+    '2'=>array('desc'=>'use "svn diff" to generate a diff.','internalKey'=>'svn_diff'),
+    '3'=>array('desc'=>'use "find" to list recursively all files (not folders) in the subtree.','internalKey'=>'find_all'),
+  ),
+  'allowMultiple' => true,
+  'default'=>'2'
+));
+if ($resultObj->isStdOut()) {
+  $choices->inChoices['allowMultiple'] = false;
+  // note that currently all above choices are valid for output to stdout
+}
+$outOptions=array(
+  'message'=>"What do you want to do with the diff?%multipleMessage% ",
+  'multipleMessage'=>' (You can specify multiple with a comma-separated list)',
+  'options'=>array(
+    '1'=>array('desc'=>'create file subtree in folder "'.$choices->outPath.'"','internalKey'=>'subtree'),
+    '2'=>array('desc'=>'write file list to "'.$choices->outPath.'/.ignore/diff.list"','internalKey'=>'file_list'),
+    '3'=>array('desc'=>'write svn diff to "'.$choices->outPath.'/.ignore/svn.diff"','internalKey'=>'diff')
+  ),
+  'allowMultiple'=>true,
+  'default'=>'3'
+);
+if (!in_array('svn_status',$choices->inChoices)) {
+  unset($outOptions['options']['1']);
+  unset($outOptions['options']['2']);  
+}
+if (!in_array('svn_diff',$choices->inChoices)) {
+  unset($outOptions['options']['3']);
+}
+$choices->outChoices = _prompt($outOptions);
+foreach ($choices->inChoices as $choice) {
+  $diffMeth = '_do_'.$choice;  
+  $diffMeth($choices,$resultObj);
+}
