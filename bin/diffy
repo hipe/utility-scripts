@@ -299,6 +299,7 @@ $outOptions=array(
     '1'=>array('desc'=>'create file subtree in folder "'.$choices->outPath.'"','internalKey'=>'subtree'),
     '2'=>array('desc'=>'write file list to "'.$choices->outPath.'/.ignore/diff.list"','internalKey'=>'file_list'),
     '3'=>array('desc'=>'write svn diff to "'.$choices->outPath.'/.ignore/svn.diff"','internalKey'=>'diff')
+    '4'=>array('desc'=>'use scp to transfer the file list to host','internalKey'=>'scp')
   ),
   'allowMultiple'=>true,
   'default'=>'3'
@@ -312,6 +313,10 @@ if (!in_array('svn_diff',$choices->inChoices)) {
 }
 $choices->outChoices = _prompt($outOptions);
 foreach ($choices->inChoices as $choice) {
-  $diffMeth = '_do_'.$choice;  
-  $diffMeth($choices,$resultObj);
+  $diffMeth = '_do_'.$choice;
+  if (is_callable($diffMeth)) {
+    $diffMeth($choices,$resultObj);    
+  } else {
+    _fatal("plugins one day maybe"); 
+  }
 }
