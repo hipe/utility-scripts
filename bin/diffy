@@ -179,14 +179,12 @@ function _make_subtree($in){
   if ($in->isStdIn) {
     $inPath = '.' ; // was '-'
   }
-  $re = '@^'.($inPath=='.'?'':($inPath.'/')).'(.+)$@';  
+  $re = '@^'.($inPath=='.'?'':($inPath.'/')).'(?:\./)?(.+)$@';  
   foreach($in->fileList as $file){ // e.g. "whatever.com/apps/web/"
-    $file = realpath($file);
     if (!preg_match($re,$file,$m)) {
       _fatal("not sure why we couldn't match: $file against $re");
     }
     $newFile = $outPath .'/'. $m[1];
-//    dve($newFile);
     if (!is_dir(dirname($newFile))) {
       _mkdir(dirname($newFile),0755,true);
     }
