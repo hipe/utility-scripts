@@ -1,0 +1,43 @@
+#!/usr/bin/env ruby
+# if you just type "rubygems" it shows all the gem folders that are in all the gem files
+# if you type "rubygems GEMNAME" (without the version number of the gem name) it will show you
+# the folder where that gem is installed
+
+# given "some-gem-thing-0.1.23" return "some-gem-thing"
+def get_short_lookup(gemname)
+  md = /^([-a-zA-z_0-9]+)-(?:\d+(?:\.\d+)*)$/.match(gemname)
+  if (!md)
+    raise Exception.new(%{Sorry, we failed to match against "#{gemname}"})
+  end
+  return $1
+end
+
+string = `gem environment`.match(/GEM PATHS:\n\s{5}-\s(.*)\n\s\s-\sGEM CONFIG/m).captures[0]
+paths = string.split("\n     - ").map{|x| x+'/gems'}
+gems = {}
+short_lookup = {}
+paths.each_with_index do |dirname,dir_index|
+  Dir.new(dirname).entries.reject{|x| /^\./=~x }.each do |gemname|
+    gems[gemname] = dir_index
+    short_lookup[get_short_lookup(gemname)] = gemname
+  end
+end
+
+arg = ARGV.pop
+if arg.nil?
+  gems.keys.sort.each do |gemname|
+    puts %{#{sprintf('%-30s',gemname+':')} dir ##{gems[gemname]}}
+  end 
+  puts "\n\nDirectories:\n"
+  paths.each_with_index do |path,index|
+    puts %{#{index} #{path}}
+  end
+elsif short_lookup[arg]
+  name_with_version = short_lookup[arg]
+  puts %{#{name_with_version}: #{paths[gems[name_with_version]]}/#{name_with_version}}
+else
+  puts %{Sorry, no information found for a gem named "#{arg}"}
+  puts %{Try one of: }+(short_lookup.keys.sort.join(', '))
+  exit
+end
+
