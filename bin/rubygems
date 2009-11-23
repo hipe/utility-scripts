@@ -5,23 +5,37 @@
 
 # given "some-gem-thing-0.1.23" return "some-gem-thing"
 def get_short_lookup(gemname)
-  md = /^([-a-zA-z_0-9]+)-(?:\d+(?:\.\d+)*)$/.match(gemname)
+  md = /^([-a-zA-z_0-9\.]+)(?:-|\.)(?:\d+(?:\.[\drc]+)*)$/.match(gemname)
   if (!md)
-    raise Exception.new(%{Sorry, we failed to match against "#{gemname}"})
+    puts %{skipping weirdly formed directory: "#{gemname}"}
+    #raise Exception.new(%{Sorry, we failed to match against "#{gemname}"})
   end
   return $1
 end
 
+require 'pp'
 string = `gem environment`.match(/GEM PATHS:\n\s{5}-\s(.*)\n\s\s-\sGEM CONFIG/m).captures[0]
 paths = string.split("\n     - ").map{|x| x+'/gems'}
 gems = {}
 short_lookup = {}
+missing = []
+
 paths.each_with_index do |dirname,dir_index|
-  Dir.new(dirname).entries.reject{|x| /^\./=~x }.each do |gemname|
+  if Dir[dirname+'/*'].size == 0
+    paths[dir_index] = nil
+    missing << dirname
+  end
+end
+paths.compact!
+paths.each_with_index do |dirname,dir_index|
+  entries = Dir.new(dirname).entries # Errno::ENOENT
+  entries.reject!{|x| x =~ /^\./ }
+  entries.each do |gemname|
     gems[gemname] = dir_index
     short_lookup[get_short_lookup(gemname)] = gemname
   end
 end
+
 
 arg = ARGV.pop
 if arg.nil?
@@ -31,6 +45,9 @@ if arg.nil?
   puts "\n\nDirectories:\n"
   paths.each_with_index do |path,index|
     puts %{#{index} #{path}}
+  end
+  if (0<missing.size)
+    puts %{(missing or empty directorie(s): #{missing * ', '})}
   end
 elsif short_lookup[arg]
   name_with_version = short_lookup[arg]

@@ -1,0 +1,236 @@
+#!/usr/bin/env ruby
+require 'rubygems'
+require 'pp'
+module Hipe; end; # any classes in here we will throw in this namespace
+
+def program_name
+  File.basename($PROGRAM_NAME)
+end
+
+def exit_with_help_invite msg
+  print msg
+  puts %{  Please type "#{program_name}" for usage information.}
+  exit
+end
+
+def exit_with_usage msg
+  puts msg
+  puts "\n"+usage
+  exit
+end
+
+
+
+def execute_files paths
+  puts paths * "\n"
+end
+
+def execute_lines paths
+  linecount_data(paths).reverse.each do |line|
+    # s = (line[:range].begin == line[:range].end) ? line[:range].begin.to_s : %{#{line[:range].begin}-#{line[:range].end}}
+    printf %{%8d    %5.01f%%    %s\n}, line[:count], line[:percent_of_max], line[:file]
+  end
+end
+
+def find_args(opts)  
+  and_list = []
+  and_list << '-not \( -type d \( -mindepth 1 -a ' + opts[:exclude_dir].map{|x| %{ -name '#{x}'} } * ' -o' + ' \) -prune \) -not -type d' if 
+     0 < opts[:exclude_dir].size
+  and_list << ' \(' + opts[:name].map{|x| %{ -name '#{x}'}} * ' -o' + ' \)' if opts[:name]
+  and_list * ' -a'
+end
+
+def linecount_data(lines)
+  cmd = %{wc -l #{lines * ' '} | sort -g} # if sort is not available on the system, consider doing it w/ ruby
+  results = `#{cmd}`.split("\n").map{|x| x.strip }
+  raise "something bad happened -- sort failure" unless /total$/ =~ results.pop
+  results.map! do |x| 
+    md = x.match(%r{(\d+)\s+(.+)$})
+    {:count => md[1].to_i, :file => md[2] } 
+  end
+  stats = Hipe::Percentiles.new(results, :count)
+  stats.calculate_percentage_of_max
+  results.each{ |entry| entry[:percent_of_max] = stats.percent_of_max entry[:count] }
+  
+  # percentiles are a useless measure for this. their distribution is always linear
+  #gemname = 'hipe-simplebtree'
+  #unless Gem.available? gemname
+  #  puts <<-EOS.gsub(/^    /,'')
+  #  skipping percentiles because gem "#{gemname}" not found.  Please try installing it
+  #  with "sudo gem install #{gemname}"
+  #  EOS
+  #else
+  #  require 'hipe-simplebtree'
+  #  percentiles = Hipe::Percentiles.new(results, :count)
+  #  results.each do |entry|
+  #    entry[:range] = percentiles.percentile_range entry[:count]
+  #  end
+  #end
+  results
+end
+
+# map line numbers to their percentile rating(s), array must be sorted
+# the resulting array will have the percentile as an index, contiguous 
+# integers from zero to the largest percentile you requested in which_percentiles.
+# the value of the array elements will be nil for the percentiles not present which_percentiles
+class Hipe::Percentiles
+  def initialize(data, attribute)
+    @data = data
+    @attribute = attribute
+  end
+  
+  def calculate_percentage_of_max
+    max_el = @data.inject{ |left,right| left[@attribute] > right[@attribute] ? left : right }
+    @max_factor = max_el[@attribute].to_f / 100
+  end
+  
+  def calculate_percentiles(which_percentiles = (0..99).to_a )
+    # which_percentiles =  (0..99).to_a #[0,25,50,75,99]#
+    raise "please don't ask for 100 or above percentile rating" if which_percentiles.last >= 100
+    result = {}
+    which_percentiles.each do |percentile|
+      result[percentile] = data[ ((percentile.to_f / 100) * data.length).floor ][attribute]
+    end
+    btree = Hipe::SimpleBTree.new()
+    btree.write_mode_on
+    result.each do |percent,count|
+      btree[count] ||= []
+      btree[count] << percent
+    end
+    btree.write_mode_off    
+    # we might have multiple percentiles for single linecount values, in which case we want to 
+    # make a percentile range.  In other words we are losslessly inverting the hash    
+    btree.each.each do |pair|
+      btree[pair[0]] = (pair[1].min .. pair[1].max)
+    end
+    @btree = btree
+  end
+  
+  # @return float from zero to one hundred
+  def percent_of_max count
+    count.to_f / @max_factor
+  end
+  
+  def percentile_range count
+    if @btree[count] 
+      @btree[count]
+    else
+      above = @btree.lower_bound count
+      below = @btree.upper_bound count
+      my_lo = below ? below[1].end : 0
+      my_hi = above ? above[1].begin : 99
+      my_lo .. my_hi
+    end    
+  end
+end
+
+
+def find_all_paths(paths,opts)
+  result_paths = []
+  paths.each do |path|
+    unless (File.directory? path)
+      result_paths << path
+    else
+      find_cmd = %{find #{path} }+find_args(opts)
+      # puts find_cmd
+      list = `#{find_cmd}`.strip.split("\n")
+      result_paths |= list
+    end
+  end
+  result_paths
+end
+
+def usage
+#...#---------#---------#---------#---------#---------#---------#---------#---------
+  s = <<-EOS.gsub(/^    /,'')  
+    usage: #{program_name} [COMMAND] [OPTIONS] [FILES]                                 
+    commands: 
+      files [OPTS] PATHS   list the resulting files that match the query.
+    
+      lines [OPTS] PATHS   shows the linecount of each file, longest first. will 
+                           go recursively into directories.  PATHS is a list of 
+                           files or directories to search.  When PATH is a file,
+                           the --name option is ignored.
+                           
+      find [OPTS] PATHS    just show the generated find command we would have used.
+                           
+    options:               
+      --name=PATTERN       e.g. --name='*.rb'.  When present, this limits the 
+                           files analyzed to the ones whose basename matches 
+                           this pattern. It can be specified multiple times to 
+                           add multiple filename patterns, which will broaden 
+                           the search.  You should use quotes to avoid
+                           shell expansion.
+                           
+      --exclude-dir=NAME   folders whose basename match this pattern will not be
+                           descended into.  It can be specified multiple times
+                           with multiple patterns to narrow the search.
+                           If not provided, the default is to skip folders whose
+                           name starts with a '.' (period).  To include such
+                           dirs, specify "--exclude-dirs=[]" the first time you
+                           use this option in the command.  (it has the effect
+                           of clearing the "blacklist" of directories to skip)   
+                           
+      --header=yes|no      whether or not to display a title line explaining 
+                           the meaning of columns when relevant. (default: yes)             
+  EOS
+end
+
+commands = ['lines','files','find']
+exit_with_usage %{expecting one of the commands: ("#{commands.join(', ')}") after "#{program_name}".} if 
+  ARGV.length==0
+command = ARGV.shift
+exit_with_help_invite  %{Unrecognized command: "#{command}". Expecting one of: ("#{commands.join(', ')}")} unless 
+  commands.include? command
+opt_grammar = {:exclude_dir=>{:multi=>true}, :name=>{:multi=>true}, :header=>{:multi=>false}}
+# because of our parsing algorithm we have to populate non-multi defaults after
+opts = {
+  :exclude_dir => ['.*'],
+}
+defaults = {
+  :header      => 'yes',
+}
+while ARGV.length > 0 and (md=%r{^--([-a-z]+)(?:=(?:'(.+)'|"(.+)"|(.+)))?$}.match ARGV[0]) do
+  ARGV.shift
+  opt_name = md[1]
+  opt_sym = opt_name.gsub('-','_').to_sym
+  value = md[2] || md[3] || md[4]  #regarless of whether or how they quoted it
+  if opts[opt_sym]
+    unless opt_grammar[opt_sym] && opt_grammar[opt_sym][:multi]
+      exit_with_help_invite %{Sorry, can't specify "--#{opt_name}" multiple times.  Please only use it once.} # or clobber
+    end
+    opts[opt_sym] = [opts[opt_sym]] unless opts[opt_sym].instance_of? Array # prolly not necessary any more
+    opts[opt_sym] << value
+  elsif opt_grammar[opt_sym] && opt_grammar[opt_sym][:multi]
+    opts[opt_sym] = [value]
+  else
+    opts[opt_sym] = value    
+  end
+end
+
+opts = defaults.merge opts
+
+if (bad_keys = opts.keys - opt_grammar.keys).count > 0
+  exit_with_help_invite %{Unrecognized option(s) #{bad_keys.map{|x| %{"--#{x.to_s.gsub('_','-')}"}}}.  Availble options are: }+
+  %{(#{opt_grammar.map{|k,v|'--'+k.to_s.gsub('_','-')} * ', '}).  Please type "#{program_name}" for more info.}
+end
+
+if opts[:exclude_dir][1] == '[]'
+  opts[:exclude_dir] = opts[:exclude_dir].slice(2,opts[:exclude_dir].size) || []
+end 
+
+if 'find' == command
+  puts "find command:\n"
+  puts 'find . '+find_args(opts)
+  puts "done."
+  exit
+end
+  
+paths = ARGV
+exit_with_help_invite "Please indicate one or more FILES (or folders) to search." if 0 == paths.size
+
+paths = find_all_paths(paths, opts)
+( puts "No files found."; exit; ) if (0==paths.size)
+
+method = 'execute_'+command
+send(method,paths)
