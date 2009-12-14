@@ -2,6 +2,7 @@
 
 require 'rubygems'
 require 'ruby-debug'
+gem     'hipe-cli', '0.0.4'
 require 'hipe-cli'
 require 'open3' 
 
@@ -21,15 +22,20 @@ require 'open3'
 
 
 class Alphabet
-  include Hipe::Cli::App
-  cli.default_command = :list
-    
+  include Hipe::Cli
+  # cli.default_command = :list
   cli.does :help  
     
-  def initialize
-    @out = cli.out
-  end
-  
+  cli.does :summary, "where does it live? what's it called? how much has changed?"
+  def summary
+    puts line('','','','').gsub(' ','_')    
+    puts line('LTR','NAME','WHERE','CHANGE').gsub(' ','_')
+    self.alphabet_data.each(&proc_where)
+    puts line('','','','').gsub(' ','_')
+    puts "                                 it's my code in a box"    
+    ''
+  end    
+      
   def alphabet_filename
     %x{ls -d ~/alphabet.txt}.chomp
   end
@@ -47,7 +53,7 @@ class Alphabet
   
   cli.does :list, "basic list of projects"
   def list
-    @out.puts %x{cat ~/alphabet.txt}
+    %x{cat ~/alphabet.txt}
   end
   
   def report_where_and_change(x)
@@ -97,7 +103,7 @@ class Alphabet
   
   def line(letter,title,where,change)
     first_col = ((letter.length + title.length) > 0) ? %{#{letter} -> #{title}} : ''
-    sprintf(%{%-22s  |%40s  | %15s}, first_col.slice(0,22), where, change)    
+    sprintf(%{| %-22s  |%33s  | %15s |}, first_col.slice(0,22), where, change)    
   end
   
   def num_files_changed(letter)
@@ -113,14 +119,7 @@ class Alphabet
     err = '(bad link)' if err =~ /no such file or directory/i
     out+(err.length>0?(err) : '')
   end
-  
-  cli.does :summary, "where does it live? what's it called? how much has changed?"
-  def summary
-    puts line('','','','').gsub(' ','_')    
-    puts line('LTR','NAME','WHERE','CHANGE').gsub(' ','_')
-    self.alphabet_data.each(&proc_where)
-  end
 
 end
 
-Alphabet.run if $PROGRAM_NAME == __FILE__
+puts Alphabet.new.cli.run(ARGV) if $PROGRAM_NAME == __FILE__
