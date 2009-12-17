@@ -23,8 +23,8 @@ require 'open3'
 
 class Alphabet
   include Hipe::Cli
-  # cli.default_command = :list
-  cli.does :help  
+  cli.default_command = 'help'
+  cli.does '-h','--help'
     
   cli.does :summary, "where does it live? what's it called? how much has changed?"
   def summary
