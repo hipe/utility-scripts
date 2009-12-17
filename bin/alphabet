@@ -88,7 +88,8 @@ class Alphabet
     else
       where = "(no remote)"+describe_ln_target(letter)
     end
-    change = %{#{num_files_changed(letter)} files changed}
+    num = num_files_changed(letter)
+    change = (0==num) ? %{ok} : %{#{num_files_changed(letter)} files changed}
     return [where,change]
   end
   
