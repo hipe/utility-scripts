@@ -1,0 +1,19 @@
+#!/bin/bash
+
+
+if [ "" = "$1" ]; then
+  echo "usage: $0 GEMNAME"
+fi
+
+function go {
+  x=`gem which $1`
+  matched=`expr "$x" : "Can't find ruby library"`
+  if [ "$matched" -gt 0 ]; then
+    echo $x
+  else
+    basename=`expr "$x" : '\(.*\)/[^/]*/[^/]*'`
+    mate "$basename"
+  fi
+}
+
+go $1

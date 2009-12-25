@@ -2,7 +2,6 @@
 
 require 'rubygems'
 require 'ruby-debug'
-gem     'hipe-cli', '0.0.4'
 require 'hipe-cli'
 require 'open3' 
 
