@@ -1,527 +1,536 @@
-#!/usr/bin/env ruby
-require 'hipe-core/struct/table'
-require 'hipe-core/interfacey'
-require 'open3'
-require 'ostruct'
+#!/usr/bin/envruby
+require'hipe-core/struct/table'
+require'hipe-core/interfacey'
+require'open3'
+require'ostruct'
+require'ruby-debug'
 
 
-class Hipe::FileMetrics2
-  include Hipe::Interfacey::Service
-  interface.might do
+classHipe::FileMetrics2
+includeHipe::Interfacey::Service
+interface.mightdo
 
-    speaks :cli
+speaks:cli
 
-    describe <<-desc
-            filemetrics - view statistics about distribution of lines of code
-            as they are distributed accross a tree of files
-            desc
+describe<<-desc
+filemetrics-viewstatisticsaboutdistributionoflinesofcode
+astheyaredistributedaccrossatreeoffiles
+desc
 
-    default_request "help"
+default_request"help"
 
-    responds_to("lc").desc <<-desc
-        shows the linecount of each file, longest first. Show
-        percentages of max for each file.   will go recursively
-        into directories.
+responds_to("lc").desc<<-desc
+showsthelinecountofeachfile,longestfirst.Show
+percentagesofmaxforeachfile.willgorecursively
+intodirectories.
 
-        desc
+desc
 
-    responds_to("lc") do
+responds_to("lc")do
 
-      opts.on('-n','--name NAME', :many=>true).
-        desc <<-desc
-                e.g. --name='*.rb'.  When present, this limits the
-                files analyzed to the ones whose basename matches
-                this pattern. It can be specified multiple times to
-                add multiple filename patterns, which will broaden
-                the search.  You should use quotes to avoid
-                shell expansion.")
+opts.on('-n','--nameNAME',:many=>true).
+desc<<-desc
+e.g.--name='*.rb'.Whenpresent,thislimitsthe
+filesanalyzedtotheoneswhosebasenamematches
+thispattern.Itcanbespecifiedmultipletimesto
+addmultiplefilenamepatterns,whichwillbroaden
+thesearch.Youshouldusequotestoavoid
+shellexpansion.")
 
-                When PATH is a file, this option is ignored.
+WhenPATHisafile,thisoptionisignored.
 
-                desc
-
-
-      opts.on('-e','--exclude-dir DIR', :many=>true, :default=>'.*').
-        desc <<-desc
-                folders whose basename match this pattern will not be
-                descended into.  It can be specified multiple times
-                with multiple patterns to narrow the search.
-                If not provided, the default is to skip folders whose
-                name starts with a '.' (period).  To include such
-                dirs, specify "--exclude-dirs=[]" the first time you
-                use this option in the command.  (it has the effect
-                of clearing the "blacklist" of directories to skip)
-
-                desc
+desc
 
 
-      opts.on('--find',
-                'just show the generated find command we would have used.')
+opts.on('-e','--exclude-dirDIR',:many=>true,:default=>'.*').
+desc<<-desc
+folderswhosebasenamematchthispatternwillnotbe
+descendedinto.Itcanbespecifiedmultipletimes
+withmultiplepatternstonarrowthesearch.
+Ifnotprovided,thedefaultistoskipfolderswhose
+namestartswitha'.'(period).Toincludesuch
+dirs,specify"--exclude-dirs=[]"thefirsttimeyou
+usethisoptioninthecommand.(ithastheeffect
+ofclearingthe"blacklist"ofdirectoriestoskip)
 
-      opts.on('--list',
-                'just list the resulting files that match the query.')
-
-      # opts.on('-e','--[no-]table', :default=>'yes').desc <<-desc
-      #           whether or not to render the results in an ascii table,
-      #           with a title header and columns headers. (default: yes)
-      #           desc
-
-
-      opts.on('-h','--help','this screen',&help)
-
-      required('path', "the file or directory to search.")
-
-    end
-
-    cmd = responds_to("dirs")
-
-    cmd.desc <<-desc
-      experimental report.  all folders one level under <path>,
-      for each of them report number of files and total sloc,
-      and show them in order of total sloc and percent of max
-    desc
-
-    cmd.define do
-      opts.on('-n','--name PATTERN', 'multiple names patterns', :many=>true)
-      opts.on('-e','--exclude-dir DIR', :many=>true, :default=>'.*').
-        desc <<-desc
-          folders to skip. defaults to '.*'
-        desc
-      opts.on('--find','only show find command')
-      opts.on('--list','only list matched folders ')
-      opts.on('-h',&help)
-      required('path')
-    end
-
-    responds_to "help", "this page", :aliases=>['-h','--help','-?']
-  end
-
-  def lc path, opts
-    return build_find_files_command(path,opts) if opts.find
-    filepaths = find_all_paths([path], opts) or return error
-    return filepaths * "\n" if opts.list
-    branch = linecount_branch_node_one_level('files', filepaths) or
-      return error
-    branch.sort_by!{|node| node.stats.ratio_of_max}
-    table = Hipe::Table.make do
-      label %|summary of linecounts for #{branch.name}|
-      field(:line_count){|node| sprintf('%8d',node.stats.count)      }
-      field(:percent)   {|node| node.stats.percent_of_max('%5.01f%') }
-      field(:filename)  {|node| node.name                            }
-      list branch.list
-    end
-    table.render(:ascii)
-  end
-
-  def find_all_paths paths, opts
-    result = []
-    paths.each do |path|
-      if File.directory? path
-        result |= (find_files(path, opts) or return error)
-      else
-        result << path unless result.include? path
-      end
-    end
-    result
-  end
-
-  def find_files path, opts
-    find_cmd = build_find_files_command(path,opts)
-    run_find_command find_cmd or return error
-  end
-
-  def build_find_files_command path,opts
-    %{find #{path} #{files_query(opts)}}
-  end
-
-  def run_find_command cmd
-    system_lines cmd
-  end
-
-  # @todo make this more robust
-  def system_lines cmd
-    sin, sout, serr = Open3.popen3 cmd
-    out, err = [sout.read.strip, serr.read.strip]
-    return error(%|error running system command: "#{err}"|) unless err == ""
-    out.split("\n")
-  end
-
-  def files_query opts
-    ands = []
-    if opts.exclude_dir.size > 0
-      dirnames = opts.exclude_dir.map{|x| %{ -name '#{x}'} } * ' -o'
-      ands.push '-not \( -type d \( -mindepth 1 -a ' + dirnames +
-        ' \) -prune \) -not -type d'
-    end
-    if opts.name
-      ands.push ' \('+opts.name.map{|x| %{ -name '#{x}'}} * ' -o' + ' \)'
-    end
-    ands * ' -a'
-  end
+desc
 
 
-  def linecount_branch_node_one_level label, files
-    # if sort is not available on the system, consider doing it w/ ruby
-    return DataNode::Branch.new if files.size == 0
-    lines = system_lines(%{wc -l #{files * ' '} | sort -g}) or return error
-    case lines.size
-      when 0 : return error("not expecting zero lines from wc")
-      when 1 :
-        md = /^(\d+) (.+)$/.match(lines.last) or
-          return error(%|regex fail against wc results: "#{lines.last}"|)
-        wc_total = md[1]
-      else
-        md = /^ *(\d+) total$/.match(x=lines.pop) or
-          return error(%|regex fail against wc results: "#{x}"|)
-        wc_total = md[1].to_i
-    end
-    lines.map! do |wordcount_line|
-      match_data = wordcount_line.match(%r{(\d+)\s+(.+)$}) or return("fail")
-      Hipe::DataNode::Leaf.new do |me|
-        me.count = match_data[1].to_i
-        me.name = match_data[2]
-      end
-    end
-    branch = Hipe::DataNode::Branch.new() do |b|
-      b.name = label;
-      b.list = lines
-    end
-    Hipe::Stats[branch]
-  end
+opts.on('--find',
+'justshowthegeneratedfindcommandwewouldhaveused.')
+
+opts.on('--list',
+'justlisttheresultingfilesthatmatchthequery.')
+
+#opts.on('-e','--[no-]table',:default=>'yes').desc<<-desc
+#whetherornottorendertheresultsinanasciitable,
+#withatitleheaderandcolumnsheaders.(default:yes)
+#desc
 
 
-  def build_find_dirs_command path, opts
-    ands = []
-    if opts.exclude_dir.size > 0
-      dirnames = opts.exclude_dir.map{|x| %{ -name '#{x}'} } * ' -o'
-      ands.push '-not \( -type d \( -mindepth 1 -a ' + dirnames +
-        ' \) -prune \) '
-    end
-    ands.push ' -maxdepth 1 -type d'
-    qry = ands * ' -a'
-    %|find #{path} #{qry}|
-  end
+opts.on('-h','--help','thisscreen',&help)
 
-  def dirs path, opts
-    file_exists(path) or return error
-    find_command = build_find_dirs_command(path, opts)
-    return find_command if opts.find
-    files = system_lines(find_command) or return error
-    return (files * "\n") if opts.list
-    do_dirs path, files, opts
-  end
+required('path',"thefileordirectorytosearch.")
 
-  def file_exists path
-    File.exist?(path) ? true : error("file does not exist: #{path}")
-  end
-
-  def do_dirs path, folders, opts
-    root_list = folders.map do |folder|
-      list = find_files(folder, opts) or return error
-      linecount_branch_node_one_level(
-        File.basename(folder), list
-      ) or return error
-    end
-    root = Hipe::DataNode::Branch.new do |me|
-      me.name = "folders summary"
-      me.list = root_list
-    end
-    Hipe::Stats[root]
-
-    root.sort_by! do |child|
-      child.stats.count
-    end
-
-    table = Hipe::Table.make do
-      label %|summary of folders in #{path}|
-      field(:folder_name)     {|x| x.name                                }
-      field(:total_lines)     {|x| x.stats.count                         }
-      field(:percent_of_max)  {|x| x.stats.percent_of_max('%5.01f')      }
-      field(:number_of_files) {|x| x.list.length                         }
-      field(:longest_file)    {|x| x.stats.max                           }
-      list root.list
-    end
-
-    table.render(:ascii)
-  end
-
-  # @oldschool setter-getter. use this to return false and a message
-  # from subroutines.  use this also to get the last set message as a
-  # response object suitable for returning from inteface-level commands
-  def error(msg = nil)
-    if msg.nil?
-      msg = @last_error_msg || 'unknown error!'
-      Hipe::Interfacey::ResponseLite.new(:error => msg)
-    else
-      re = /^([^:]+):(\d+)(?::in `([^']+)')?$/
-      if (md = caller(1)[0].match(re))
-        msg << %| (near #{File.basename(md[1])} line #{md[2]})|
-        # @todo this isn't what we want but why?
-      end
-      @last_error_msg = msg
-      false
-    end
-  end
 end
 
-module Hipe::Stats
+cmd=responds_to("dirs")
 
-  #
-  # Enhance a DataNode::Branch-like with statistics about its nodes
-  #
-  # Objects that extend Stats should respond to "count" or "list", those
-  # those that respond to "list" should yield objects that respond to "count"
-  # or "list"... and so on.
-  #
-  # (originally jumped through a lot of hoops so that we could
-  # determine the percentile rating of the number of lines of each file
-  # among the set of files,
-  # (including re-writing a pure-ruby binary search tree,)
-  # then realized after finishing it that a percentile rating of
-  # each item among a group of items will always have a linear distribution,
-  # making the results uninteresting.)
-  #
-  #
+cmd.desc<<-desc
+experimentalreport.allfoldersonelevelunder<path>,
+foreachofthemreportnumberoffilesandtotalsloc,
+andshowtheminorderoftotalslocandpercentofmax
+desc
 
+cmd.definedo
+opts.on('-n','--namePATTERN','multiplenamespatterns',:many=>true)
+opts.on('-e','--exclude-dirDIR',:many=>true,:default=>'.*').
+desc<<-desc
+folderstoskip.defaultsto'.*'
+desc
+opts.on('--find','onlyshowfindcommand')
+opts.on('--list','onlylistmatchedfolders')
+opts.on('-h',&help)
+required('path')
+end
 
-  # common pattern
-  def self.[] obj; obj.extend self; obj  end
-  def self.extended obj;  obj.init_stats end
+responds_to"help","thispage",:aliases=>['-h','--help','-?']
+end
 
-  def init_stats
-    class << self
-      attr_reader :stats
-    end
-    @stats ||= Calculator.new self
-  end
+deflcpath,opts
+returnbuild_find_files_command(path,opts)ifopts.find
+filepaths=find_all_paths([path],opts)orreturnerror
+returnfilepaths*"\n"ifopts.list
+branch=linecount_branch_node_one_level('files',filepaths)or
+returnerror
+branch.sort_by!{|node|node.stats.ratio_of_max}
+table=Hipe::Table.makedo
+label%|summaryoflinecountsfor#{branch.name}|
+field(:line_count){|node|sprintf('%8d',node.stats.count)}
+field(:percent){|node|node.stats.percent_of_max('%5.01f%')}
+field(:filename){|node|node.name}
+listbranch.list||[]
+end
+table.render(:ascii)
+end
 
-  class StatsError < RuntimeError; end
+deffind_all_pathspaths,opts
+result=[]
+paths.eachdo|path|
+ifFile.directory?path
+result|=(find_files(path,opts)orreturnerror)
+else
+result<<pathunlessresult.include?path
+end
+end
+result
+end
 
-  class StatsCache < OpenStruct; end
+deffind_filespath,opts
+find_cmd=build_find_files_command(path,opts)
+run_find_commandfind_cmdorreturnerror
+end
 
-  class Calculator
+defbuild_find_files_commandpath,opts
+%{find#{path}#{files_query(opts)}}
+end
 
-    #
-    # A stats calculator object holds a handle to a data node and
-    # calculates and caches statistical operations on the node.
-    #
+defrun_find_commandcmd
+system_linescmd
+end
 
-    attr_accessor :parent
-    def initialize node
-      err = Hipe::ShapeAssert.fails(node) do |it|
-        to_be_a "calculatable node"
-        required_that it.respond_to?(:name)
-        required_that it.respond_to?(:count) || it.respond_to?(:list)
-      end
-      raise StatsError.new(err.message) if err
+#@todomakethismorerobust
+defsystem_linescmd
+sin,sout,serr=Open3.popen3cmd
+out,err=[sout.read.strip,serr.read.strip]
+returnerror(%|errorrunningsystemcommand:"#{err}"|)unlesserr==""
+out.split("\n")
+end
 
-      @node = node
-      @cache = StatsCache.new
-      if @node.respond_to? :list
-        @node.list.each do |child|
-          Hipe::Stats[child]
-          child.stats.parent = self
-        end
-      end
-    end
-    def count
-      @cache.count ||= begin
-        if @node.respond_to? :count
-          @node.count
-        elsif @node.respond_to? :list
-          @node.list.map{|child| child.stats.count}.reduce(:+)
-        else
-          raise StatsError.new(%|can't determine count for "#{@node.name}"|)
-        end
-      end
-    end
-    def max_node
-      @cache.max_node ||= begin
-        if @node.respond_to? :list
-          return nil if @node.list.size == 0
-          @node.list.inject do |longest,current|
-            longest.stats.max > current.stats.max ? longest : current
-          end
-        elsif @node.respond_to? :count
-          @node
-        else
-          raise StatsError.new(
-            %|can't determine max node for "#{@node.name}"|)
-        end
-      end
-    end
-    def max
-      max_node.stats.count
-    end
-    def ratio_of_max
-      raise StatsError.new(%|can't calculate ratio of max |<<
-        %|on nodes without parents|) unless parent
-      result = count.to_f / parent.max.to_f
-      result
-    end
-    def percent_of_max(fmt)
-      ratio = ratio_of_max
-      percent = ratio * 100
-      sprintf(fmt, percent)
-    end
-  end # Calculator
-
-  #
-  # map line numbers to their percentile rating(s), array must be sorted
-  # the resulting array will have the percentile as an index, contiguous
-  # integers from zero to the largest percentile you requested in
-  # which_percentiles.  The value of the array elements will be nil for the
-  # percentiles not present which_percentiles
-  #
-  # def calculate_percentiles(which_percentiles = (0..99).to_a )
-  #   # which_percentiles =  (0..99).to_a #[0,25,50,75,99]#
-  #   raise "please don't ask for 100 or above percentile rating" if
-  #     which_percentiles.last >= 100
-  #   result = {}
-  #   which_percentiles.each do |percentile|
-  #     result[percentile] = data[
-  #       ((percentile.to_f / 100) * data.length).floor
-  #     ][attribute]
-  #   end
-  #   btree = Hipe::SimpleBTree.new()
-  #   btree.write_mode_on
-  #   result.each do |percent,count|
-  #     btree[count] ||= []
-  #     btree[count] << percent
-  #   end
-  #   btree.write_mode_off
-  #   # we might have multiple percentiles for single linecount values,
-  #   # in which case we want to make a percentile range.  In other words we
-  #   # are losslessly inverting the hash
-  #   btree.each.each do |pair|
-  #     btree[pair[0]] = (pair[1].min .. pair[1].max)
-  #   end
-  #   @btree = btree
-  # end
-  #
-  # def percentile_range count
-  #   if @btree[count]
-  #     @btree[count]
-  #   else
-  #     above = @btree.lower_bound count
-  #     below = @btree.upper_bound count
-  #     my_lo = below ? below[1].end : 0
-  #     my_hi = above ? above[1].begin : 99
-  #     my_lo .. my_hi
-  #   end
-  # end
-
-
-
-end # Stats
-
-module Hipe::DataNode
-  #
-  # data nodes are slightly enhanced structs of some sort.
-  # they should not have a lot of heavy method implementations,
-  # they just hold data
-  #
-  module SemiReadableConstuctor
-    def initialize *args, &block
-      super(*args)
-      yield self
-    end
-  end
-  class Branch < Struct.new(:list,:name);
-    undef :count
-    def initialize *args, &block
-      super(*args)
-      yield self if block_given?
-      list ||= []
-    end
-    def sort_by!(&block)
-      list.sort! do |x,y|
-        left = block.call(x)
-        rite = block.call(y)
-        (left == rite) ? 0 : (left > rite ? -1 : 1 )
-      end
-    end
-  end
-  class Leaf < Struct.new(:name, :count);
-    include SemiReadableConstuctor
-  end
-end # DataNode
-
-module Hipe::ShapeAssert
-  #
-  # attempt at a really lightweight structural/interface assertion thing
-  # inspired by bacon
-  #
-  class ShapeAssertFail < RuntimeError; end
-  class MakeDefinitionFail < ShapeAssertFail; end
-  class MatchDefinitionFail < ShapeAssertFail; end
-
-  #
-  # raises MatchDefinitionFail if the thing doesn't match the description
-  # raises MakeDefinitionFail if there is something wrong with the definition
-  # @return nil
-  #
-  def self.against thing, &block
-    if fail = fails(thing, &block)
-      raise fail
-    else
-      nil
-    end
-  end
-
-  def self.fails thing, &block
-    defin = Definition.new
-    proxy = RecordingProxy.new thing
-    fail = catch(:fail) do
-      defin.instance_exec(proxy, &block)
-      nil
-    end
-    if fail
-      rec = proxy.recordings.last
-      meth = rec[0]
-      args = rec.slice(1,rec.size).map{|x| x.inspect} * ', '
-      msg = %|to be a #{defin.desc} it must #{meth}(#{args})|
-      return MatchDefinitionFail.new msg
-    end
-    return nil
-  end
-
-  class Definition
-    attr_reader :desc
-    def to_be_a desc
-      raise MakeDefinitionFail.new(
-       %|let's stick to strings not #{desc.inspect} for descriptions|
-      ) unless desc.kind_of? String
-      raise MakeDefinitionFail.new(
-       %|won't clobber existing description'|
-      ) if @desc
-      @desc = desc
-    end
-    def required_that mixed
-      throw(:fail,'fail') unless mixed
-    end
-  end
-
-  class RecordingProxy
-    #
-    # pass (almost) every message along to target, but record each one.
-    # we might eventually make recording proxies for calls like .class()
-    #
-    keep_these = ['__send__', '__id__','debugger']
-    (instance_methods - keep_these).each do |name|
-      undef_method name.to_sym
-    end
-    attr_accessor :recordings, :target
-    def initialize mixed
-      @target = mixed
-      @recordings = []
-    end
-    def method_missing name, *args
-      @recordings.push [name, *args]
-      @target.send(name, *args)
-    end
-  end
+deffiles_queryopts
+ands=[]
+ifopts.exclude_dir.size>0
+dirnames=opts.exclude_dir.map{|x|%{-name'#{x}'}}*'-o'
+ands.push'-not\(-typed\(-mindepth1-a'+dirnames+
+'\)-prune\)-not-typed'
+end
+ifopts.name
+ands.push'\('+opts.name.map{|x|%{-name'#{x}'}}*'-o'+'\)'
+end
+ands*'-a'
 end
 
 
-puts Hipe::FileMetrics2.new.cli_run(ARGV)
+deflinecount_branch_node_one_levellabel,files
+#ifsortisnotavailableonthesystem,considerdoingitw/ruby
+returnHipe::DataNode::Branch.newiffiles.size==0
+lines=system_lines(%{wc-l#{files*''}|sort-g})orreturnerror
+caselines.size
+when0:returnerror("notexpectingzerolinesfromwc")
+when1:
+md=/^(\d+)(.+)$/.match(lines.last)or
+returnerror(%|regexfailagainstwcresults:"#{lines.last}"|)
+wc_total=md[1]
+else
+md=/^*(\d+)total$/.match(x=lines.pop)or
+returnerror(%|regexfailagainstwcresults:"#{x}"|)
+wc_total=md[1].to_i
+end
+lines.map!do|wordcount_line|
+match_data=wordcount_line.match(%r{(\d+)\s+(.+)$})orreturn("fail")
+Hipe::DataNode::Leaf.newdo|me|
+me.count=match_data[1].to_i
+me.name=match_data[2]
+end
+end
+branch=Hipe::DataNode::Branch.new()do|b|
+b.name=label;
+b.list=lines
+end
+Hipe::Stats[branch]
+end
+
+
+defbuild_find_dirs_commandpath,opts
+ands=[]
+ifopts.exclude_dir.size>0
+dirnames=opts.exclude_dir.map{|x|%{-name'#{x}'}}*'-o'
+ands.push'-not\(-typed\(-mindepth1-a'+dirnames+
+'\)-prune\)'
+end
+ands.push'-maxdepth1-typed'
+qry=ands*'-a'
+%|find#{path}#{qry}|
+end
+
+defdirspath,opts
+file_exists(path)orreturnerror
+find_command=build_find_dirs_command(path,opts)
+returnfind_commandifopts.find
+files=system_lines(find_command)orreturnerror
+return(files*"\n")ifopts.list
+do_dirspath,files,opts
+end
+
+deffile_existspath
+File.exist?(path)?true:error("filedoesnotexist:#{path}")
+end
+
+defdo_dirspath,folders,opts
+root_list=folders.mapdo|folder|
+list=find_files(folder,opts)orreturnerror
+linecount_branch_node_one_level(
+File.basename(folder),list
+)orreturnerror
+end
+root=Hipe::DataNode::Branch.newdo|me|
+me.name="folderssummary"
+me.list=root_list
+end
+Hipe::Stats[root]
+
+root.sort_by!do|child|
+child.stats.count
+end
+
+table=Hipe::Table.makedo
+label%|summaryoffoldersin#{path}|
+field(:folder_name){|x|x.name}
+field(:total_lines){|x|x.stats.count}
+field(:percent_of_max){|x|x.stats.percent_of_max('%5.01f')}
+field(:number_of_files){|x|x.list.length}
+field(:longest_file){|x|x.stats.max}
+listroot.list
+end
+
+table.render(:ascii)
+end
+
+#@oldschoolsetter-getter.usethistoreturnfalseandamessage
+#fromsubroutines.usethisalsotogetthelastsetmessageasa
+#responseobjectsuitableforreturningfrominteface-levelcommands
+deferror(msg=nil)
+ifmsg.nil?
+msg=@last_error_msg||'unknownerror!'
+Hipe::Interfacey::ResponseLite.new(:error=>msg)
+else
+re=/^([^:]+):(\d+)(?::in`([^']+)')?$/
+if(md=caller(1)[0].match(re))
+msg<<%|(near#{File.basename(md[1])}line#{md[2]})|
+#@todothisisn'twhatwewantbutwhy?
+end
+@last_error_msg=msg
+false
+end
+end
+end
+
+moduleHipe::Stats
+
+#
+#EnhanceaDataNode::Branch-likewithstatisticsaboutitsnodes
+#
+#ObjectsthatextendStatsshouldrespondto"count"or"list",those
+#thosethatrespondto"list"shouldyieldobjectsthatrespondto"count"
+#or"list"...andsoon.
+#
+#(originallyjumpedthroughalotofhoopssothatwecould
+#determinethepercentileratingofthenumberoflinesofeachfile
+#amongthesetoffiles,
+#(includingre-writingapure-rubybinarysearchtree,)
+#thenrealizedafterfinishingitthatapercentileratingof
+#eachitemamongagroupofitemswillalwayshavealineardistribution,
+#makingtheresultsuninteresting.)
+#
+#
+
+
+#commonpattern
+defself.[]obj;obj.extendself;objend
+defself.extendedobj;obj.init_statsend
+
+definit_stats
+class<<self
+attr_reader:stats
+end
+@stats||=Calculator.newself
+end
+
+classStatsError<RuntimeError;end
+
+classStatsCache#wasopenstructbut...
+attr_accessor:count,:max_node
+end
+
+classCalculator
+
+#
+#Astatscalculatorobjectholdsahandletoadatanodeand
+#calculatesandcachesstatisticaloperationsonthenode.
+#
+
+attr_accessor:parent
+definitializenode
+raise"whereisnode"unlessnode
+err=Hipe::ShapeAssert.fails(node)do|it|
+to_be_a"calculatablenode"
+required_thatit.respond_to?(:name)
+required_thatit.respond_to?(:count)||it.respond_to?(:list)
+end
+raiseStatsError.new(err.message)iferr
+
+@node=node
+@cache=StatsCache.new
+if@node.respond_to?:listand@node.list&&@node.list.size
+@node.list.eachdo|child|
+Hipe::Stats[child]
+child.stats.parent=self
+end
+end
+end
+defcount
+@cache.count||=begin
+if@node.respond_to?:count
+@node.count
+elsif@node.respond_to?:list
+@node.list.map{|child|child.stats.count}.reduce(:+)
+else
+raiseStatsError.new(%|can'tdeterminecountfor"#{@node.name}"|)
+end
+end
+@cache.count||0
+end
+defmax_node
+@cache.max_node||=begin
+if@node.respond_to?:list
+returnnilif@node.list.size==0
+@node.list.injectdo|longest,current|
+longest.stats.max>current.stats.max?longest:current
+end
+@node
+elsif@node.respond_to?:count
+@node
+else
+raiseStatsError.new(
+%|can'tdeterminemaxnodefor"#{@node.name}"|)
+end
+end
+end
+defmax
+max_node?max_node.stats.count:0#@todo
+end
+defratio_of_max
+raiseStatsError.new(%|can'tcalculateratioofmax|<<
+%|onnodeswithoutparents|)unlessparent
+result=count.to_f/parent.max.to_f
+result
+end
+defpercent_of_max(fmt)
+ratio=ratio_of_max
+percent=ratio*100
+sprintf(fmt,percent)
+end
+end#Calculator
+
+#
+#maplinenumberstotheirpercentilerating(s),arraymustbesorted
+#theresultingarraywillhavethepercentileasanindex,contiguous
+#integersfromzerotothelargestpercentileyourequestedin
+#which_percentiles.Thevalueofthearrayelementswillbenilforthe
+#percentilesnotpresentwhich_percentiles
+#
+#defcalculate_percentiles(which_percentiles=(0..99).to_a)
+##which_percentiles=(0..99).to_a#[0,25,50,75,99]#
+#raise"pleasedon'taskfor100orabovepercentilerating"if
+#which_percentiles.last>=100
+#result={}
+#which_percentiles.eachdo|percentile|
+#result[percentile]=data[
+#((percentile.to_f/100)*data.length).floor
+#][attribute]
+#end
+#btree=Hipe::SimpleBTree.new()
+#btree.write_mode_on
+#result.eachdo|percent,count|
+#btree[count]||=[]
+#btree[count]<<percent
+#end
+#btree.write_mode_off
+##wemighthavemultiplepercentilesforsinglelinecountvalues,
+##inwhichcasewewanttomakeapercentilerange.Inotherwordswe
+##arelosslesslyinvertingthehash
+#btree.each.eachdo|pair|
+#btree[pair[0]]=(pair[1].min..pair[1].max)
+#end
+#@btree=btree
+#end
+#
+#defpercentile_rangecount
+#if@btree[count]
+#@btree[count]
+#else
+#above=@btree.lower_boundcount
+#below=@btree.upper_boundcount
+#my_lo=below?below[1].end:0
+#my_hi=above?above[1].begin:99
+#my_lo..my_hi
+#end
+#end
+
+
+
+end#Stats
+
+moduleHipe::DataNode
+#
+#datanodesareslightlyenhancedstructsofsomesort.
+#theyshouldnothavealotofheavymethodimplementations,
+#theyjustholddata
+#
+moduleSemiReadableConstuctor
+definitialize*args,&block
+super(*args)
+yieldself
+end
+end
+classBranch
+attr_accessor:name,:list
+definitialize&block
+@list=[]
+@name=''
+yieldselfifblock_given?
+end
+deflist=list
+@list=list||[]
+end
+defsort_by!(&block)
+list.sort!do|x,y|
+left=block.call(x)
+rite=block.call(y)
+(left==rite)?0:(left>rite?-1:1)
+end
+end
+end
+classLeaf<Struct.new(:name,:count);
+includeSemiReadableConstuctor
+end
+end#DataNode
+
+moduleHipe::ShapeAssert
+#
+#attemptatareallylightweightstructural/interfaceassertionthing
+#inspiredbybacon
+#
+classShapeAssertFail<RuntimeError;end
+classMakeDefinitionFail<ShapeAssertFail;end
+classMatchDefinitionFail<ShapeAssertFail;end
+
+#
+#raisesMatchDefinitionFailifthethingdoesn'tmatchthedescription
+#raisesMakeDefinitionFailifthereissomethingwrongwiththedefinition
+#@returnnil
+#
+defself.againstthing,&block
+iffail=fails(thing,&block)
+raisefail
+else
+nil
+end
+end
+
+defself.failsthing,&block
+defin=Definition.new
+proxy=RecordingProxy.newthing
+fail=catch(:fail)do
+defin.instance_exec(proxy,&block)
+nil
+end
+iffail
+rec=proxy.recordings.last
+meth=rec[0]
+args=rec.slice(1,rec.size).map{|x|x.inspect}*','
+msg=%|tobea#{defin.desc}itmust#{meth}(#{args})|
+returnMatchDefinitionFail.newmsg
+end
+returnnil
+end
+
+classDefinition
+attr_reader:desc
+defto_be_adesc
+raiseMakeDefinitionFail.new(
+%|let'ssticktostringsnot#{desc.inspect}fordescriptions|
+)unlessdesc.kind_of?String
+raiseMakeDefinitionFail.new(
+%|won'tclobberexistingdescription'|
+)if@desc
+@desc=desc
+end
+defrequired_thatmixed
+throw(:fail,'fail')unlessmixed
+end
+end
+
+classRecordingProxy
+#
+#pass(almost)everymessagealongtotarget,butrecordeachone.
+#wemighteventuallymakerecordingproxiesforcallslike.class()
+#
+keep_these=['__send__','__id__','debugger']
+(instance_methods-keep_these).eachdo|name|
+undef_methodname.to_sym
+end
+attr_accessor:recordings,:target
+definitializemixed
+@target=mixed
+@recordings=[]
+end
+defmethod_missingname,*args
+@recordings.push[name,*args]
+@target.send(name,*args)
+end
+end
+end
+
+
+putsHipe::FileMetrics2.new.cli_run(ARGV)
